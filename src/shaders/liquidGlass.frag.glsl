@@ -6,11 +6,8 @@ out vec4 o_color;
 
 uniform sampler2D u_background;
 uniform sampler2D u_blur;
+uniform sampler2D u_mask;
 uniform vec2 u_resolution;
-uniform vec2 u_center;
-uniform float u_width;
-uniform float u_height;
-uniform float u_powerFactor;
 uniform float u_a;
 uniform float u_b;
 uniform float u_c;
@@ -28,15 +25,6 @@ uniform float u_time;
 
 const float M_E = 2.718281828459045;
 
-float sdSuperellipse(vec2 p, float n, float r) {
-  vec2 p_abs = abs(p);
-  float numerator = pow(p_abs.x, n) + pow(p_abs.y, n) - pow(r, n);
-  float den_x = pow(p_abs.x, 2.0 * n - 2.0);
-  float den_y = pow(p_abs.y, 2.0 * n - 2.0);
-  float denominator = n * sqrt(den_x + den_y) + 0.00001;
-  return numerator / denominator;
-}
-
 float f(float x) {
   return 1.0 - u_b * pow(u_c * M_E, -u_d * x - u_a);
 }
@@ -51,21 +39,19 @@ float Glow(vec2 uv) {
 
 void main() {
   vec4 bg = texture(u_background, v_uv);
-
-  vec2 centered = v_uv - u_center;
-  vec2 shapeSize = max(vec2(u_width, u_height), vec2(0.001));
-  vec2 p = centered / (shapeSize / 20.0);
-  float d = sdSuperellipse(p, u_powerFactor, 1.0);
-
-  if (d > 0.0) {
+  float mask = texture(u_mask, v_uv).r;
+  if (mask <= 0.001) {
     o_color = bg;
     return;
   }
 
-  float dist = -d;
-  vec2 sampleP = p * pow(f(dist), u_fPower);
-  vec2 sampleUv = u_center + sampleP * (shapeSize / 20.0);
-  sampleUv = clamp(sampleUv, 0.0, 1.0);
+  vec2 texel = 1.0 / u_resolution;
+  float gx = texture(u_mask, v_uv + vec2(texel.x, 0.0)).r - texture(u_mask, v_uv - vec2(texel.x, 0.0)).r;
+  float gy = texture(u_mask, v_uv + vec2(0.0, texel.y)).r - texture(u_mask, v_uv - vec2(0.0, texel.y)).r;
+  vec2 normalOffset = vec2(gx, gy);
+
+  float dist = clamp(mask, 0.0, 1.0);
+  vec2 sampleUv = clamp(v_uv - normalOffset * pow(f(dist), u_fPower), 0.0, 1.0);
 
   vec4 blurColor = texture(u_blur, sampleUv);
   vec4 baseColor = mix(bg, blurColor, 0.82);
@@ -77,6 +63,6 @@ void main() {
   float mul = Glow(v_uv) * u_glowWeight * glowMask + 1.0 + u_glowBias;
 
   vec3 glass = baseColor.rgb * mul + noise.rgb * u_noise;
-  float edge = smoothstep(0.08, 0.0, abs(d));
+  float edge = smoothstep(0.02, 0.2, mask);
   o_color = vec4(mix(bg.rgb, glass, edge), 1.0);
 }

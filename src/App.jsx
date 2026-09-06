@@ -16,7 +16,7 @@ const initialSettings = {
   powerFactor: 3.0,
   width: 3.5,
   height: 3.5,
-  blurIters: 1,
+  blurIters: 0,
   blurRadius: 2.0,
   blurDownscale: 0.5,
   noise: 0.06,
@@ -57,6 +57,7 @@ function App() {
   const canvasRef = useRef(null)
   const fileInputRef = useRef(null)
   const settingsRef = useRef(initialSettings)
+  const clearMaskRef = useRef(() => {})
   const backgroundIdRef = useRef('white')
   const backgroundsRef = useRef(new Map())
   const runtimeRef = useRef({ reloadShader: null })
@@ -64,6 +65,7 @@ function App() {
   const [backgroundId, setBackgroundId] = useState('white')
   const [backgrounds, setBackgrounds] = useState(initialBackgrounds)
   const [fps, setFps] = useState(0)
+  const [brushCursor, setBrushCursor] = useState({ x: 120, y: 120, visible: true })
 
   useEffect(() => {
     settingsRef.current = settings
@@ -108,6 +110,7 @@ function App() {
       glassLocations = {
         background: gl.getUniformLocation(glassProgram, 'u_background'),
         blur: gl.getUniformLocation(glassProgram, 'u_blur'),
+        mask: gl.getUniformLocation(glassProgram, 'u_mask'),
         resolution: gl.getUniformLocation(glassProgram, 'u_resolution'),
         center: gl.getUniformLocation(glassProgram, 'u_center'),
         width: gl.getUniformLocation(glassProgram, 'u_width'),
@@ -130,15 +133,19 @@ function App() {
     compilePrograms()
 
     const backgroundTexture = gl.createTexture()
+    const maskTexture = gl.createTexture()
     let blurTargetA = createTextureTarget(gl, 1, 1)
     let blurTargetB = createTextureTarget(gl, 1, 1)
     const backgroundCanvas = document.createElement('canvas')
     const backgroundCtx = backgroundCanvas.getContext('2d')
+    const maskCanvas = document.createElement('canvas')
+    const maskCtx = maskCanvas.getContext('2d')
 
-    if (!backgroundTexture || !backgroundCtx) return undefined
+    if (!backgroundTexture || !maskTexture || !backgroundCtx || !maskCtx) return undefined
 
     const sceneState = {
       backgroundDirty: true,
+      maskDirty: true,
       blurDirty: true,
       backgroundWidth: 1,
       backgroundHeight: 1,
@@ -163,7 +170,8 @@ function App() {
     let lastTimestamp = 0
     let fpsSmoothed = 0
     let lastFpsPaint = 0
-    let pointer = { x: 0.5, y: 0.5 }
+    let isPainting = false
+    let lastPaintPoint = null
     let lastBgId = null
     let lastBlurScale = -1
     let lastBlurIters = -1
@@ -215,6 +223,47 @@ function App() {
       const blurWidth = Math.max(1, Math.floor(width * settingsRef.current.blurDownscale))
       const blurHeight = Math.max(1, Math.floor(height * settingsRef.current.blurDownscale))
       resizeBlurTargets(blurWidth, blurHeight)
+    }
+
+    const stampBrush = (x, y) => {
+      const radius = Math.max(2, settingsRef.current.width * 12.0)
+      const softEdge = clamp(settingsRef.current.powerFactor / 6.0, 0.05, 0.98)
+      const innerRadius = radius * (1.0 - softEdge)
+      const gradient = maskCtx.createRadialGradient(x, y, innerRadius, x, y, radius)
+      gradient.addColorStop(0, settingsRef.current.mouseControl ? 'rgba(0,0,0,1)' : 'rgba(255,255,255,1)')
+      gradient.addColorStop(1, settingsRef.current.mouseControl ? 'rgba(0,0,0,0)' : 'rgba(255,255,255,0)')
+      maskCtx.globalCompositeOperation = settingsRef.current.mouseControl ? 'destination-out' : 'source-over'
+      maskCtx.fillStyle = gradient
+      maskCtx.beginPath()
+      maskCtx.arc(x, y, radius, 0, Math.PI * 2)
+      maskCtx.fill()
+      sceneState.maskDirty = true
+    }
+
+    const paintStroke = (from, to) => {
+      if (!from) {
+        stampBrush(to.x, to.y)
+        return
+      }
+      const dx = to.x - from.x
+      const dy = to.y - from.y
+      const distance = Math.hypot(dx, dy)
+      const step = Math.max(1, settingsRef.current.width * 3.0)
+      const segments = Math.max(1, Math.ceil(distance / step))
+      for (let i = 0; i <= segments; i += 1) {
+        const t = i / segments
+        stampBrush(from.x + dx * t, from.y + dy * t)
+      }
+    }
+
+    const clearMask = (seedDefault = false) => {
+      maskCtx.globalCompositeOperation = 'source-over'
+      maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height)
+      if (seedDefault) {
+        stampBrush(maskCanvas.width * 0.5, maskCanvas.height * 0.5)
+      } else {
+        sceneState.maskDirty = true
+      }
     }
 
     const drawBlurPass = (inputTexture, target, direction) => {
@@ -269,6 +318,9 @@ function App() {
       if (width !== canvas.width || height !== canvas.height) {
         canvas.width = width
         canvas.height = height
+        maskCanvas.width = width
+        maskCanvas.height = height
+        clearMask(true)
         sceneState.backgroundDirty = true
         sceneState.blurDirty = true
       }
@@ -289,11 +341,11 @@ function App() {
       gl.bindTexture(gl.TEXTURE_2D, blurTexture)
       gl.uniform1i(glassLocations.blur, 1)
 
+      gl.activeTexture(gl.TEXTURE2)
+      gl.bindTexture(gl.TEXTURE_2D, maskTexture)
+      gl.uniform1i(glassLocations.mask, 2)
+
       gl.uniform2f(glassLocations.resolution, canvas.width, canvas.height)
-      gl.uniform2f(glassLocations.center, pointer.x, pointer.y)
-      gl.uniform1f(glassLocations.width, settingsRef.current.width)
-      gl.uniform1f(glassLocations.height, settingsRef.current.height)
-      gl.uniform1f(glassLocations.powerFactor, settingsRef.current.powerFactor)
       gl.uniform1f(glassLocations.a, settingsRef.current.a)
       gl.uniform1f(glassLocations.b, settingsRef.current.b)
       gl.uniform1f(glassLocations.c, settingsRef.current.c)
@@ -346,6 +398,10 @@ function App() {
       if (sceneState.blurDirty) {
         rebuildBlur()
       }
+      if (sceneState.maskDirty) {
+        createTextureFromCanvas(gl, maskTexture, maskCanvas)
+        sceneState.maskDirty = false
+      }
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, null)
       gl.viewport(0, 0, canvas.width, canvas.height)
@@ -369,29 +425,46 @@ function App() {
       raf = window.requestAnimationFrame(frame)
     }
 
-    const onPointerDown = (event) => {
-      if (!settingsRef.current.mouseControl) return
+    const getCanvasPoint = (event) => {
       const rect = canvas.getBoundingClientRect()
-      pointer = {
-        x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
-        y: clamp(1 - (event.clientY - rect.top) / rect.height, 0, 1),
+      return {
+        x: clamp(((event.clientX - rect.left) / rect.width) * canvas.width, 0, canvas.width),
+        y: clamp(((event.clientY - rect.top) / rect.height) * canvas.height, 0, canvas.height),
       }
+    }
+
+    const onPointerDown = (event) => {
+      isPainting = true
+      const point = getCanvasPoint(event)
+      setBrushCursor({ x: event.clientX, y: event.clientY, visible: true })
+      paintStroke(null, point)
+      lastPaintPoint = point
       canvas.setPointerCapture(event.pointerId)
     }
 
     const onPointerMove = (event) => {
-      if (!settingsRef.current.mouseControl) return
-      const rect = canvas.getBoundingClientRect()
-      pointer = {
-        x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
-        y: clamp(1 - (event.clientY - rect.top) / rect.height, 0, 1),
-      }
+      setBrushCursor({ x: event.clientX, y: event.clientY, visible: true })
+      if (!isPainting) return
+      const point = getCanvasPoint(event)
+      paintStroke(lastPaintPoint, point)
+      lastPaintPoint = point
     }
 
     const onPointerUp = (event) => {
+      isPainting = false
+      lastPaintPoint = null
       if (canvas.hasPointerCapture(event.pointerId)) {
         canvas.releasePointerCapture(event.pointerId)
       }
+    }
+
+    const onPointerEnter = (event) => {
+      setBrushCursor({ x: event.clientX, y: event.clientY, visible: true })
+    }
+
+    const onPointerLeave = (event) => {
+      onPointerUp(event)
+      setBrushCursor((current) => ({ ...current, visible: false }))
     }
 
     const onResize = () => {
@@ -410,11 +483,14 @@ function App() {
     canvas.addEventListener('pointerdown', onPointerDown)
     canvas.addEventListener('pointermove', onPointerMove)
     canvas.addEventListener('pointerup', onPointerUp)
-    canvas.addEventListener('pointerleave', onPointerUp)
+    canvas.addEventListener('pointerenter', onPointerEnter)
+    canvas.addEventListener('pointerleave', onPointerLeave)
 
     resizeCanvas()
     sceneState.backgroundDirty = true
+    sceneState.maskDirty = true
     sceneState.blurDirty = true
+    clearMaskRef.current = () => clearMask(false)
     frame(0)
 
     return () => {
@@ -424,10 +500,12 @@ function App() {
       canvas.removeEventListener('pointerdown', onPointerDown)
       canvas.removeEventListener('pointermove', onPointerMove)
       canvas.removeEventListener('pointerup', onPointerUp)
-      canvas.removeEventListener('pointerleave', onPointerUp)
+      canvas.removeEventListener('pointerenter', onPointerEnter)
+      canvas.removeEventListener('pointerleave', onPointerLeave)
       gl.deleteProgram(blurProgram)
       gl.deleteProgram(glassProgram)
       gl.deleteTexture(backgroundTexture)
+      gl.deleteTexture(maskTexture)
       gl.deleteTexture(blurTargetA.texture)
       gl.deleteTexture(blurTargetB.texture)
       gl.deleteFramebuffer(blurTargetA.framebuffer)
@@ -481,6 +559,15 @@ function App() {
   return (
     <main className="app-shell">
       <canvas ref={canvasRef} className="shader-canvas" aria-label="Liquid glass shader" />
+      <div
+        className={`brush-cursor${brushCursor.visible ? ' is-visible' : ''}`}
+        style={{
+          left: brushCursor.x,
+          top: brushCursor.y,
+          width: Math.max(6, settings.width * 24),
+          height: Math.max(6, settings.width * 24),
+        }}
+      />
 
       <aside className="debug-panel">
         <div className="debug-inner">
@@ -516,7 +603,7 @@ function App() {
               checked={settings.mouseControl}
               onChange={updateSetting('mouseControl')}
             />
-            <span>Move with mouse</span>
+            <span>Erase brush</span>
           </label>
 
           <details open className="section">
@@ -555,6 +642,9 @@ function App() {
                   onChange={updateSetting('height')}
                 />
               </label>
+              <button type="button" className="upload-button" onClick={() => clearMaskRef.current()}>
+                Clear glass
+              </button>
             </div>
           </details>
 
